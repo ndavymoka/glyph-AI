@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">Glyph Oracle</string>
+    <string name="toy_name_oracle">Glyph AI Oracle</string>
+    <string name="toy_summary_oracle">Hold the Glyph Button, ask a voice question, and get an ultra-short AI answer on the 25×25 Glyph Matrix</string>
+    <string name="tab_matrix">МАТРИЦА 25×25</string>
+    <string name="tab_ai_config">AI &amp; ПРОМПТ</string>
+    <string name="tab_history">ИСТОРИЯ</string>
+    <string name="tab_guide">NOTHING OS</string>
+    <string name="btn_hold_glyph">ЗАЖАТЬ GLYPH BUTTON (ГОЛОС)</string>
+    <string name="btn_stop_listening">ОСТАНОВИТЬ ЗАПИСЬ</string>
+    <string name="hint_quick_question">Быстрый вопрос (например: что лучше RTX 4060 или RTX 5070?)</string>
+    <string name="btn_ask_text">СПРОСИТЬ</string>
+    <string name="status_idle">ГОТОВ • ЗАЖМИТЕ GLYPH BUTTON</string>
+    <string name="status_listening">СЛУШАЮ... ГОВОРИТЕ (АВТОСТОП ПРИ ПАУЗЕ)</string>
+    <string name="status_thinking">НЕЙРОСЕТЬ ДУМАЕТ...</string>
+    <string name="status_displaying">ВЫВОД НА МАТРИЦУ 25×25</string>
+    <string name="status_error">ОШИБКА ЗАПРОСА</string>
+</resources>

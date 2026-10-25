@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="200dp"
+    android:height="200dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M50,2A48,48 0 1,1 50,98A48,48 0 1,1 50,2Z" />
+    <!-- 25x25 Stylized Glyph Matrix Preview for Nothing OS Glyph Toys Manager -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M46,18h8v8h-8zM38,26h8v8h-8zM54,26h8v8h-8zM54,34h8v8h-8zM46,42h8v8h-8zM46,50h8v8h-8zM46,66h8v8h-8z" />
+    <path
+        android:fillColor="#FF666670"
+        android:pathData="M22,46h6v6h-6zM72,46h6v6h-6zM30,18h6v6h-6zM64,18h6v6h-6zM30,74h6v6h-6zM64,74h6v6h-6z" />
+</vector>

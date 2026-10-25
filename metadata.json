@@ -1,0 +1,10 @@
+{
+  "name": "Glyph Oracle",
+  "description": "Voice AI Oracle for Nothing Phone (3) 25x25 Glyph Matrix supporting Groq, Gemini, and OpenRouter",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

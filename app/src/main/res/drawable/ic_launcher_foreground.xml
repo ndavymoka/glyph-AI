@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer Matrix Circle Ring -->
+    <path
+        android:fillColor="#FF252530"
+        android:pathData="M54,24A30,30 0 1,1 54,84A30,30 0 1,1 54,24Z" />
+    <path
+        android:fillColor="#FF0D0D12"
+        android:pathData="M54,27A27,27 0 1,1 54,81A27,27 0 1,1 54,27Z" />
+    <!-- Dot Matrix Oracle Core (White LEDs) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,48A6,6 0 1,1 54,60A6,6 0 1,1 54,48Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,34A4,4 0 1,1 54,42A4,4 0 1,1 54,34Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,66A4,4 0 1,1 54,74A4,4 0 1,1 54,66Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M38,50A4,4 0 1,1 38,58A4,4 0 1,1 38,50Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M70,50A4,4 0 1,1 70,58A4,4 0 1,1 70,50Z" />
+    <path
+        android:fillColor="#FFB0B0BA"
+        android:pathData="M43,39A3,3 0 1,1 43,45A3,3 0 1,1 43,39Z" />
+    <path
+        android:fillColor="#FFB0B0BA"
+        android:pathData="M65,39A3,3 0 1,1 65,45A3,3 0 1,1 65,39Z" />
+    <path
+        android:fillColor="#FFB0B0BA"
+        android:pathData="M43,63A3,3 0 1,1 43,69A3,3 0 1,1 43,63Z" />
+    <!-- Nothing Red Recording Accent Dot -->
+    <path
+        android:fillColor="#FFD71921"
+        android:pathData="M65,62A4.5,4.5 0 1,1 65,71A4.5,4.5 0 1,1 65,62Z" />
+</vector>
