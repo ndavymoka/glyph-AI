@@ -7,6 +7,8 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -49,10 +51,6 @@ object AiOracleClient {
             .build()
     }
 
-    /**
-     * Pre-warms DNS + TCP + TLS 1.3 + HTTP/2 connection to the active AI provider while the user
-     * is speaking their question into the microphone, eliminating 150-350ms of handshake latency.
-     */
     suspend fun prewarmConnection(settings: OracleSettings) = withContext(Dispatchers.IO) {
         try {
             val provider = settings.selectedProvider
@@ -65,19 +63,46 @@ object AiOracleClient {
             val reqBuilder = Request.Builder()
                 .url(pingUrl)
                 .head()
-            if (provider != AiProvider.GEMINI && key.isNotBlank()) {
-                reqBuilder.header("Authorization", "Bearer $key")
+            if (key.isNotBlank()) {
+                if (provider == AiProvider.GEMINI) {
+                    reqBuilder.header("x-goog-api-key", key)
+                } else {
+                    reqBuilder.header("Authorization", "Bearer $key")
+                }
             }
             okHttpClient.newCall(reqBuilder.build()).execute().close()
         } catch (_: Throwable) {
-            // Best-effort socket pre-warm
         }
     }
 
     /**
-     * Fetches the list of available models from the selected AI provider's API
-     * (`GET {baseUrl}/models` for OpenAI-compatible providers, `/v1beta/models` for Gemini).
+     * Extracts non-thinking text from a Gemini candidate object so Gemini 2.5 Pro / Flash / 3.0
+     * thinking parts (`"thought": true`) don't swallow or overwrite the actual final answer.
      */
+    private fun extractGeminiResponseText(root: JsonObject): String {
+        val parts = root["candidates"]?.jsonArray
+            ?.firstOrNull()?.jsonObject
+            ?.get("content")?.jsonObject
+            ?.get("parts")?.jsonArray
+            ?: return ""
+
+        val nonThoughtTexts = parts.mapNotNull { partEl ->
+            val obj = partEl.jsonObject
+            val isThought = obj["thought"]?.jsonPrimitive?.booleanOrNull == true
+            if (isThought) null else obj["text"]?.jsonPrimitive?.content?.trim()
+        }.filter { it.isNotEmpty() }
+
+        if (nonThoughtTexts.isNotEmpty()) {
+            return nonThoughtTexts.joinToString("\n").trim()
+        }
+
+        // Fallback if model returned only a single text part
+        return parts.lastOrNull()?.jsonObject
+            ?.get("text")?.jsonPrimitive?.content
+            ?.trim()
+            .orEmpty()
+    }
+
     suspend fun fetchAvailableModels(
         provider: AiProvider,
         apiKey: String,
@@ -100,7 +125,9 @@ object AiOracleClient {
             val models = when (provider) {
                 AiProvider.GEMINI -> {
                     val req = Request.Builder()
-                        .url("$cleanBase/models?key=$cleanKey")
+                        .url("$cleanBase/models?pageSize=100&key=$cleanKey")
+                        .header("x-goog-api-key", cleanKey)
+                        .header("Authorization", "Bearer $cleanKey")
                         .header("Accept", "application/json")
                         .get()
                         .build()
@@ -109,10 +136,27 @@ object AiOracleClient {
                         if (!resp.isSuccessful) {
                             throw IllegalStateException("Gemini HTTP ${resp.code}: ${extractApiErrorMessage(body)}")
                         }
-                        val arr = json.parseToJsonElement(body).jsonObject["models"]?.jsonArray
+                        val rootObj = json.parseToJsonElement(body).jsonObject
+                        val arr = rootObj["models"]?.jsonArray ?: rootObj["data"]?.jsonArray
                         arr?.mapNotNull { el ->
-                            el.jsonObject["name"]?.jsonPrimitive?.content?.removePrefix("models/")
-                        }?.filter { it.startsWith("gemini") } ?: emptyList()
+                            val obj = el.jsonObject
+                            val name = (obj["name"]?.jsonPrimitive?.content
+                                ?: obj["id"]?.jsonPrimitive?.content)
+                                ?.removePrefix("models/")
+                                ?: return@mapNotNull null
+
+                            val methods = obj["supportedGenerationMethods"]?.jsonArray
+                                ?.mapNotNull { it.jsonPrimitive.content }
+                            val supportsGenerate = methods == null || methods.contains("generateContent")
+
+                            val isExcluded = name.contains("embedding", ignoreCase = true) ||
+                                name.contains("aqa", ignoreCase = true) ||
+                                name.contains("imagen", ignoreCase = true) ||
+                                name.contains("veo", ignoreCase = true) ||
+                                name.contains("tts", ignoreCase = true)
+
+                            if (supportsGenerate && !isExcluded) name else null
+                        } ?: emptyList()
                     }
                 }
 
@@ -140,7 +184,7 @@ object AiOracleClient {
                                 !id.contains("dall-e", ignoreCase = true)
                         } ?: emptyList()
 
-                        if (provider == AiProvider.OPENROUTER) list.take(45) else list.sorted()
+                        if (provider == AiProvider.OPENROUTER) list.take(60) else list.sorted()
                     }
                 }
             }
@@ -159,11 +203,6 @@ object AiOracleClient {
         }
     }
 
-    /**
-     * Fast-path single-round-trip Audio -> Oracle Answer for Gemini when Gemini is the active provider
-     * and no separate Groq Whisper key is configured. Sends the WAV audio and system prompt in ONE
-     * HTTP request instead of two sequential requests, cutting latency in half!
-     */
     suspend fun processAudioAndAskOracle(
         wavBytes: ByteArray,
         settings: OracleSettings
@@ -172,7 +211,6 @@ object AiOracleClient {
         val groqKey = settings.getResolvedApiKey(AiProvider.GROQ)
         val geminiKey = settings.getResolvedApiKey(AiProvider.GEMINI)
 
-        // Single-round-trip optimization when Gemini is the selected provider and Groq Whisper isn't overriding
         if (settings.selectedProvider == AiProvider.GEMINI && geminiKey.isNotBlank() && groqKey.isBlank()) {
             try {
                 val singleTrip = askGeminiAudioSingleTrip(wavBytes, geminiKey, settings, totalStart)
@@ -180,7 +218,6 @@ object AiOracleClient {
                     return@withContext Result.success(singleTrip)
                 }
             } catch (_: Exception) {
-                // Fall back to 2-step transcribe + askOracle below
             }
         }
 
@@ -209,9 +246,11 @@ object AiOracleClient {
     ): AiOracleResult? {
         val base64Audio = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
         val userModel = settings.getActiveModel(AiProvider.GEMINI).removePrefix("models/").trim()
+        val baseUrl = settings.getBaseUrl(AiProvider.GEMINI)
         val candidates = linkedSetOf(
             userModel.ifBlank { "gemini-2.5-flash" },
             "gemini-2.5-flash",
+            "gemini-2.0-flash",
             "gemini-flash-latest"
         )
 
@@ -231,7 +270,8 @@ object AiOracleClient {
 
         for (model in candidates) {
             try {
-                val url = "${settings.getBaseUrl(AiProvider.GEMINI)}/models/$model:generateContent?key=${geminiKey.trim()}"
+                val url = "$baseUrl/models/$model:generateContent?key=${geminiKey.trim()}"
+                val isProThinking = model.contains("pro", ignoreCase = true)
                 val payload = buildJsonObject {
                     putJsonArray("contents") {
                         add(
@@ -252,12 +292,14 @@ object AiOracleClient {
                     }
                     putJsonObject("generationConfig") {
                         put("temperature", 0.1)
-                        put("maxOutputTokens", 50)
+                        put("maxOutputTokens", if (isProThinking) 1024 else 256)
                     }
                 }.toString()
 
                 val request = Request.Builder()
                     .url(url)
+                    .header("x-goog-api-key", geminiKey.trim())
+                    .header("Authorization", "Bearer ${geminiKey.trim()}")
                     .post(payload.toByteArray(Charsets.UTF_8).toRequestBody(jsonMediaType))
                     .build()
 
@@ -265,14 +307,7 @@ object AiOracleClient {
                     val bodyString = response.body?.string().orEmpty()
                     if (!response.isSuccessful) continue
                     val root = json.parseToJsonElement(bodyString).jsonObject
-                    val rawText = root["candidates"]?.jsonArray
-                        ?.firstOrNull()?.jsonObject
-                        ?.get("content")?.jsonObject
-                        ?.get("parts")?.jsonArray
-                        ?.firstOrNull()?.jsonObject
-                        ?.get("text")?.jsonPrimitive?.content
-                        ?.trim()
-                        .orEmpty()
+                    val rawText = extractGeminiResponseText(root)
 
                     if (rawText.isNotBlank()) {
                         val lines = rawText.lines().map { it.trim() }.filter { it.isNotBlank() }
@@ -304,11 +339,6 @@ object AiOracleClient {
         return null
     }
 
-    /**
-     * Transcribes 16kHz mono WAV audio recorded by `LockScreenAudioRecorder`.
-     * Supports Groq Whisper (`whisper-large-v3-turbo`), OpenAI Whisper (`whisper-1`),
-     * Gemini Audio, OpenRouter Audio, and Custom OpenAI-compatible `/audio/transcriptions`.
-     */
     suspend fun transcribeAudioWav(
         wavBytes: ByteArray,
         settings: OracleSettings
@@ -399,7 +429,6 @@ object AiOracleClient {
                 }
 
                 AiProvider.DEEPSEEK -> {
-                    // DeepSeek does not host an audio/transcriptions endpoint; handled by fallback providers
                 }
             }
         }
@@ -470,20 +499,21 @@ object AiOracleClient {
         settings: OracleSettings
     ): String {
         val base64Audio = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
+        val baseUrl = settings.getBaseUrl(AiProvider.GEMINI)
         val userModel = settings.getActiveModel(AiProvider.GEMINI)
             .removePrefix("models/")
             .trim()
         val candidateModels = linkedSetOf(
             userModel.ifBlank { "gemini-2.5-flash" },
             "gemini-2.5-flash",
-            "gemini-flash-latest",
-            "gemini-2.0-flash"
+            "gemini-2.0-flash",
+            "gemini-flash-latest"
         )
 
         var lastError: Exception? = null
         for (model in candidateModels) {
             try {
-                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=${geminiKey.trim()}"
+                val url = "$baseUrl/models/$model:generateContent?key=${geminiKey.trim()}"
 
                 val payload = buildJsonObject {
                     putJsonArray("contents") {
@@ -512,12 +542,14 @@ object AiOracleClient {
                     }
                     putJsonObject("generationConfig") {
                         put("temperature", 0.0)
-                        put("maxOutputTokens", 35)
+                        put("maxOutputTokens", 256)
                     }
                 }.toString()
 
                 val request = Request.Builder()
                     .url(url)
+                    .header("x-goog-api-key", geminiKey.trim())
+                    .header("Authorization", "Bearer ${geminiKey.trim()}")
                     .post(payload.toByteArray(Charsets.UTF_8).toRequestBody(jsonMediaType))
                     .build()
 
@@ -527,14 +559,7 @@ object AiOracleClient {
                         throw IllegalStateException("HTTP ${response.code} ($model): ${extractApiErrorMessage(bodyString)}")
                     }
                     val root = json.parseToJsonElement(bodyString).jsonObject
-                    val rawText = root["candidates"]?.jsonArray
-                        ?.firstOrNull()?.jsonObject
-                        ?.get("content")?.jsonObject
-                        ?.get("parts")?.jsonArray
-                        ?.firstOrNull()?.jsonObject
-                        ?.get("text")?.jsonPrimitive?.content
-                        ?.trim()
-                        .orEmpty()
+                    val rawText = extractGeminiResponseText(root)
                     val cleaned = filterSttHallucinations(rawText)
                     if (cleaned.isNotBlank()) return cleaned
                 }
@@ -585,7 +610,7 @@ object AiOracleClient {
                 )
             }
             put("temperature", 0.0)
-            put("max_tokens", 35)
+            put("max_tokens", 64)
         }.toString()
 
         val request = Request.Builder()
@@ -674,12 +699,24 @@ object AiOracleClient {
         try {
             val (rawText, usedModel) = when (provider) {
                 AiProvider.GEMINI -> {
-                    callGeminiWithFallback(
-                        requestedModel = requestedModel,
-                        apiKey = apiKey,
-                        systemInstruction = fullSystemInstruction,
-                        question = question
-                    )
+                    if (baseUrl.endsWith("/openai", ignoreCase = true) || baseUrl.endsWith("/v1", ignoreCase = true)) {
+                        callOpenCompatibleChatApi(
+                            url = "$baseUrl/chat/completions",
+                            apiKey = apiKey,
+                            model = requestedModel.removePrefix("models/"),
+                            systemInstruction = fullSystemInstruction,
+                            question = question,
+                            isOpenRouter = false
+                        ) to requestedModel
+                    } else {
+                        callGeminiWithFallback(
+                            baseUrl = baseUrl,
+                            requestedModel = requestedModel,
+                            apiKey = apiKey,
+                            systemInstruction = fullSystemInstruction,
+                            question = question
+                        )
+                    }
                 }
 
                 AiProvider.GROQ -> {
@@ -771,7 +808,9 @@ object AiOracleClient {
             model.contains("reasoner", ignoreCase = true) ||
             model.startsWith("o1", ignoreCase = true) ||
             model.startsWith("o3", ignoreCase = true) ||
-            model.contains("qwen3", ignoreCase = true)
+            model.contains("qwen3", ignoreCase = true) ||
+            model.contains("2.5-pro", ignoreCase = true) ||
+            model.contains("thinking", ignoreCase = true)
 
         val payload = buildJsonObject {
             put("model", model.trim())
@@ -791,7 +830,7 @@ object AiOracleClient {
             }
             if (!isReasoningModel) {
                 put("temperature", 0.1)
-                put("max_tokens", 24)
+                put("max_tokens", 64)
             }
         }.toString()
 
@@ -833,6 +872,7 @@ object AiOracleClient {
     }
 
     private fun callGeminiWithFallback(
+        baseUrl: String,
         requestedModel: String,
         apiKey: String,
         systemInstruction: String,
@@ -842,13 +882,14 @@ object AiOracleClient {
         val candidates = linkedSetOf(
             cleanRequested,
             "gemini-2.5-flash",
-            "gemini-flash-latest",
-            "gemini-2.0-flash"
+            "gemini-2.0-flash",
+            "gemini-flash-latest"
         )
         var firstError: Exception? = null
         for (modelCandidate in candidates) {
             try {
                 val reply = callGeminiRestApi(
+                    baseUrl = baseUrl,
                     model = modelCandidate,
                     apiKey = apiKey,
                     systemInstruction = systemInstruction,
@@ -867,37 +908,57 @@ object AiOracleClient {
     }
 
     private fun callGeminiRestApi(
+        baseUrl: String,
         model: String,
         apiKey: String,
         systemInstruction: String,
         question: String
     ): String {
         val cleanModel = model.trim().removePrefix("models/").ifBlank { "gemini-2.5-flash" }
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$cleanModel:generateContent?key=${apiKey.trim()}"
+        val cleanBase = baseUrl.trim().trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
+        val url = "$cleanBase/models/$cleanModel:generateContent?key=${apiKey.trim()}"
+
+        // Gemma models do not support systemInstruction field in v1beta, so prepend to user prompt
+        val isGemmaModel = cleanModel.startsWith("gemma", ignoreCase = true)
+        val isProOrThinking = cleanModel.contains("pro", ignoreCase = true) ||
+            cleanModel.contains("thinking", ignoreCase = true) ||
+            cleanModel.contains("2.5", ignoreCase = true) ||
+            cleanModel.contains("3", ignoreCase = true)
 
         val payload = buildJsonObject {
-            putJsonObject("systemInstruction") {
-                putJsonArray("parts") {
-                    add(buildJsonObject { put("text", systemInstruction) })
+            if (!isGemmaModel) {
+                putJsonObject("systemInstruction") {
+                    putJsonArray("parts") {
+                        add(buildJsonObject { put("text", systemInstruction) })
+                    }
                 }
             }
             putJsonArray("contents") {
                 add(
                     buildJsonObject {
+                        put("role", "user")
                         putJsonArray("parts") {
-                            add(buildJsonObject { put("text", question) })
+                            val combinedText = if (isGemmaModel) {
+                                "$systemInstruction\n\nQuestion: $question"
+                            } else {
+                                question
+                            }
+                            add(buildJsonObject { put("text", combinedText) })
                         }
                     }
                 )
             }
             putJsonObject("generationConfig") {
                 put("temperature", 0.1)
-                put("maxOutputTokens", 28)
+                // Give plenty of tokens so Gemini 2.5 Pro / 3.0 thinking budget never truncates the final 2-word output
+                put("maxOutputTokens", if (isProOrThinking) 1024 else 128)
             }
         }.toString()
 
         val request = Request.Builder()
             .url(url)
+            .header("x-goog-api-key", apiKey.trim())
+            .header("Authorization", "Bearer ${apiKey.trim()}")
             .post(payload.toByteArray(Charsets.UTF_8).toRequestBody(jsonMediaType))
             .build()
 
@@ -911,14 +972,9 @@ object AiOracleClient {
             }
 
             val root = json.parseToJsonElement(bodyString).jsonObject
-            val text = root["candidates"]?.jsonArray
-                ?.firstOrNull()?.jsonObject
-                ?.get("content")?.jsonObject
-                ?.get("parts")?.jsonArray
-                ?.firstOrNull()?.jsonObject
-                ?.get("text")?.jsonPrimitive?.content
+            val text = extractGeminiResponseText(root)
 
-            if (text.isNullOrBlank()) {
+            if (text.isBlank()) {
                 throw IllegalStateException("Empty Gemini API response ($cleanModel)")
             }
             return text
